@@ -2,6 +2,7 @@ const { v4: uuidv4 } = require("uuid");
 const { Document } = require("../../../models/documents");
 const { Telemetry } = require("../../../models/telemetry");
 const { Workspace } = require("../../../models/workspace");
+const { WorkspaceChats } = require("../../../models/workspaceChats");
 const {
   getLLMProvider,
   getEmbeddingEngineSelection,
@@ -122,6 +123,8 @@ function apiOpenAICompatibleEndpoints(app) {
         const workspace = await Workspace.get({ slug: String(model) });
         if (!workspace) return response.status(401).end();
 
+        // Get message count for limit check (now handled in the handler)
+
         const userMessage = messages.pop();
         if (userMessage.role !== "user") {
           return response.status(400).json({
@@ -139,14 +142,26 @@ function apiOpenAICompatibleEndpoints(app) {
           messages.find((chat) => chat.role === "system")?.content ?? null;
         const history = messages.filter((chat) => chat.role !== "system") ?? [];
 
+        // Determine final temperature: Priority is request -> workspace -> 0.7
+        const finalTemperature = temperature !== undefined && temperature !== null
+          ? Number(temperature)
+          : workspace?.openAiTemp ?? 0.7;
+
+        // Get message limit info using the helper function
+        const { getMessageLimitInfo } = require("../../../utils/helpers");
+        const { messageCount, messagesLimit } = await getMessageLimitInfo(workspace);
+        
         if (!stream) {
           const chatResult = await OpenAICompatibleChat.chatSync({
+            messagesLimit, // Pass down for contingent
+            messageCount, // Pass down for contingent 
             workspace,
             systemPrompt,
             history,
             prompt: extractTextContent(userMessage.content),
             attachments: extractAttachments(userMessage.content),
-            temperature: Number(temperature),
+            temperature: finalTemperature,
+
           });
 
           await Telemetry.sendTelemetry("sent_chat", {
@@ -160,7 +175,18 @@ function apiOpenAICompatibleEndpoints(app) {
             workspaceName: workspace?.name,
             chatModel: workspace?.chatModel || "System Default",
           });
-          return response.status(200).json(chatResult);
+          // Add finalTemperature to the response
+          chatResult.finalTemperature = finalTemperature;
+          
+          // Check if the result contains a specific HTTP status code flag
+          if (chatResult.httpStatusCode) {
+            // Use the specified status code (like 429 for rate limiting)
+            return response.status(chatResult.httpStatusCode).json(chatResult);
+          } else {
+            // Default to 200 OK for normal responses
+            // The chatResult already contains the updated contingent and messages_limit values
+            return response.status(200).json(chatResult);
+          }
         }
 
         response.setHeader("Cache-Control", "no-cache");
@@ -170,12 +196,15 @@ function apiOpenAICompatibleEndpoints(app) {
         response.flushHeaders();
 
         await OpenAICompatibleChat.streamChat({
+          messageCount,
+          messagesLimit, // Pass down for contingent (can be null)
           workspace,
+          response,
           systemPrompt,
           history,
           prompt: extractTextContent(userMessage.content),
           attachments: extractAttachments(userMessage.content),
-          temperature: Number(temperature),
+          temperature: finalTemperature,
           response,
         });
         await Telemetry.sendTelemetry("sent_chat", {

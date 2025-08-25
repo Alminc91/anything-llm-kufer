@@ -10,3 +10,5 @@ aws_cf_deploy_anything_llm.json
 yarn.lock
 *.bak
 .idea
+docker/docker-compose.override.yml
+docker-compose.override.yml

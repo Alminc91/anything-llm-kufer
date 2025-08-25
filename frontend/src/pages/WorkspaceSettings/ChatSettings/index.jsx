@@ -4,6 +4,7 @@ import showToast from "@/utils/toast";
 import { castToType } from "@/utils/types";
 import { useEffect, useRef, useState } from "react";
 import ChatHistorySettings from "./ChatHistorySettings";
+import ChatMessagesLimitSettings from "./ChatMessagesLimitSettings";
 import ChatPromptSettings from "./ChatPromptSettings";
 import ChatTemperatureSettings from "./ChatTemperatureSettings";
 import ChatModeSelection from "./ChatModeSelection";
@@ -70,6 +71,10 @@ export default function ChatSettings({ workspace }) {
           setHasChanges={setHasChanges}
         />
         <ChatHistorySettings
+          workspace={workspace}
+          setHasChanges={setHasChanges}
+        />
+        <ChatMessagesLimitSettings
           workspace={workspace}
           setHasChanges={setHasChanges}
         />

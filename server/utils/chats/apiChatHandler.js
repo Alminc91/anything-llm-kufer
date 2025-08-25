@@ -52,6 +52,21 @@ async function chatSync({
 }) {
   const uuid = uuidv4();
   const chatMode = mode ?? "chat";
+  
+  // Check if workspace has reached message limit
+  const { checkWorkspaceMessagesLimit } = require("../helpers");
+  const { limitReached, errorData } = await checkWorkspaceMessagesLimit(workspace, null, { 
+    returnData: true,
+    uuid
+  });
+  
+  if (limitReached) {
+    // Add HTTP status code flag for the endpoint handler to use
+    return {
+      ...errorData,
+      httpStatusCode: 429
+    };
+  }
 
   // If the user wants to reset the chat history we do so pre-flight
   // and continue execution. If no message is provided then the user intended
@@ -279,6 +294,10 @@ async function chatSync({
       user,
     });
 
+    // Get message limit info using the helper function
+    const { getMessageLimitInfo } = require("../helpers");
+    const { contingent, messagesLimit } = await getMessageLimitInfo(workspace);
+
     return {
       id: uuid,
       type: "textResponse",
@@ -287,6 +306,8 @@ async function chatSync({
       error: null,
       textResponse,
       metrics: {},
+      contingent,
+      messages_limit: messagesLimit,
     };
   }
 
@@ -336,6 +357,10 @@ async function chatSync({
     user,
   });
 
+  // Get message limit info using the helper function
+  const { getMessageLimitInfo } = require("../helpers");
+  const { contingent, messagesLimit } = await getMessageLimitInfo(workspace);
+
   return {
     id: uuid,
     type: "textResponse",
@@ -345,6 +370,8 @@ async function chatSync({
     textResponse,
     sources,
     metrics: performanceMetrics,
+    contingent,
+    messages_limit: messagesLimit,
   };
 }
 
@@ -376,6 +403,19 @@ async function streamChat({
 }) {
   const uuid = uuidv4();
   const chatMode = mode ?? "chat";
+  
+  // Check if workspace has reached message limit
+  const { checkWorkspaceMessagesLimit } = require("../helpers");
+  const { limitReached } = await checkWorkspaceMessagesLimit(workspace, response, { 
+    isStreaming: true, 
+    writeResponseChunk, 
+    attachments,
+    uuid
+  });
+  
+  if (limitReached) {
+    return;
+  }
 
   // If the user wants to reset the chat history we do so pre-flight
   // and continue execution. If no message is provided then the user intended
@@ -475,6 +515,13 @@ async function streamChat({
     const textResponse =
       workspace?.queryRefusalResponse ??
       "There is no relevant information in this workspace to answer your query.";
+    
+    // Get message count for contingent parameter
+    const messageCount = await WorkspaceChats.count({
+      workspaceId: workspace.id,
+    });
+    const messagesLimit = workspace.messagesLimit;
+    
     writeResponseChunk(response, {
       id: uuid,
       type: "textResponse",
@@ -484,6 +531,8 @@ async function streamChat({
       close: true,
       error: null,
       metrics: {},
+      contingent: `${messageCount}/${messagesLimit ?? 'Unlimited'}`,
+      messages_limit: messagesLimit,
     });
     await WorkspaceChats.new({
       workspaceId: workspace.id,
@@ -688,6 +737,10 @@ async function streamChat({
       user,
     });
 
+    // Get message limit info using the helper function
+    const { getMessageLimitInfo } = require("../helpers");
+    const { contingent, messagesLimit } = await getMessageLimitInfo(workspace);
+
     writeResponseChunk(response, {
       uuid,
       type: "finalizeResponseStream",
@@ -695,15 +748,23 @@ async function streamChat({
       error: false,
       chatId: chat.id,
       metrics,
+      contingent,
+      messages_limit: messagesLimit,
     });
     return;
   }
+
+  // Get message limit info using the helper function
+  const { getMessageLimitInfo } = require("../helpers");
+  const { contingent, messagesLimit } = await getMessageLimitInfo(workspace);
 
   writeResponseChunk(response, {
     uuid,
     type: "finalizeResponseStream",
     close: true,
     error: false,
+    contingent,
+    messages_limit: messagesLimit,
   });
   return;
 }

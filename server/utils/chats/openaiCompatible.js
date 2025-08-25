@@ -14,9 +14,52 @@ async function chatSync({
   prompt = null,
   attachments = [],
   temperature = null,
+  messagesLimit, // Added: workspace messages limit (can be null)
+  messageCount, // Added: Needed for contingent
 }) {
   const uuid = uuidv4();
   const chatMode = workspace?.chatMode ?? "chat";
+  
+  // Since messageCount and messagesLimit are passed as parameters,
+  // we're just checking if we're already at the limit
+  if (messagesLimit !== null && messageCount >= messagesLimit) {
+    // Get more detailed error message with reset date from helpers
+    const now = new Date();
+    const monthName = now.toLocaleString('default', { month: 'long' });
+    const lastDayOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+    const daysRemaining = lastDayOfMonth.getDate() - now.getDate();
+    const resetDate = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+    
+    // Format the reset date in the same way as in checkWorkspaceMessagesLimit
+    const formattedResetDate = new Intl.DateTimeFormat('de-DE', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric'
+    }).format(resetDate);
+    
+    const { getMessageLimitErrorText } = require("../helpers");
+    const errorMessage = getMessageLimitErrorText(
+      messagesLimit, 
+      monthName, 
+      daysRemaining, 
+      formattedResetDate
+    );
+    
+    return formatJSON(
+      {
+        id: uuid,
+        type: "abort",
+        textResponse: null,
+        sources: [],
+        close: true,
+        error: errorMessage,
+        messages_limit: messagesLimit,
+        contingent: `${messageCount}/${messagesLimit}`,
+        httpStatusCode: 429 // Add this special flag for the handler to identify status code
+      },
+      { model: workspace.slug, finish_reason: "abort", messageCount, messagesLimit }
+    );
+  }
   const LLMConnector = getLLMProvider({
     provider: workspace?.chatProvider,
     model: workspace?.chatModel,
@@ -53,7 +96,7 @@ async function chatSync({
         error: null,
         textResponse,
       },
-      { model: workspace.slug, finish_reason: "abort" }
+      { model: workspace.slug, finish_reason: "abort", messageCount, messagesLimit }
     );
   }
 
@@ -101,6 +144,10 @@ async function chatSync({
 
   // Failed similarity search if it was run at all and failed.
   if (!!vectorSearchResults.message) {
+    // Get updated message limit info for consistency
+    const { getMessageLimitInfo } = require("../helpers");
+    const { messageCount: updatedCount, messagesLimit: updatedLimit } = await getMessageLimitInfo(workspace);
+    
     return formatJSON(
       {
         id: uuid,
@@ -110,7 +157,7 @@ async function chatSync({
         close: true,
         error: vectorSearchResults.message,
       },
-      { model: workspace.slug, finish_reason: "abort" }
+      { model: workspace.slug, finish_reason: "abort", messageCount: updatedCount, messagesLimit: updatedLimit }
     );
   }
 
@@ -125,7 +172,7 @@ async function chatSync({
       workspace?.queryRefusalResponse ??
       "There is no relevant information in this workspace to answer your query.";
 
-    await WorkspaceChats.new({
+    const { chat } = await WorkspaceChats.new({
       workspaceId: workspace.id,
       prompt: String(prompt),
       response: {
@@ -137,6 +184,10 @@ async function chatSync({
       include: false,
     });
 
+    // Get updated message limit info after saving the message
+    const { getMessageLimitInfo } = require("../helpers");
+    const { messageCount: updatedCount, messagesLimit: updatedLimit } = await getMessageLimitInfo(workspace);
+
     return formatJSON(
       {
         id: uuid,
@@ -145,8 +196,9 @@ async function chatSync({
         close: true,
         error: null,
         textResponse,
+        chatId: chat.id,
       },
-      { model: workspace.slug, finish_reason: "no_content" }
+      { model: workspace.slug, finish_reason: "no_content", messageCount: updatedCount, messagesLimit: updatedLimit }
     );
   }
 
@@ -170,6 +222,10 @@ async function chatSync({
   );
 
   if (!textResponse) {
+    // Get updated message limit info for consistency
+    const { getMessageLimitInfo } = require("../helpers");
+    const { messageCount: updatedCount, messagesLimit: updatedLimit } = await getMessageLimitInfo(workspace);
+    
     return formatJSON(
       {
         id: uuid,
@@ -179,7 +235,7 @@ async function chatSync({
         error: "No text completion could be completed with this input.",
         textResponse: null,
       },
-      { model: workspace.slug, finish_reason: "no_content", usage: metrics }
+      { model: workspace.slug, finish_reason: "no_content", usage: metrics, messageCount: updatedCount, messagesLimit: updatedLimit }
     );
   }
 
@@ -195,6 +251,10 @@ async function chatSync({
     },
   });
 
+  // Get updated message limit info after saving the message
+  const { getMessageLimitInfo } = require("../helpers");
+  const { messageCount: updatedCount, messagesLimit: updatedLimit } = await getMessageLimitInfo(workspace);
+
   return formatJSON(
     {
       id: uuid,
@@ -205,21 +265,71 @@ async function chatSync({
       textResponse,
       sources,
     },
-    { model: workspace.slug, finish_reason: "stop", usage: metrics }
+    { model: workspace.slug, finish_reason: "stop", usage: metrics, messageCount: updatedCount, messagesLimit: updatedLimit }
   );
 }
 
 async function streamChat({
   workspace,
   response,
+  messageCount,
+  messagesLimit, // Changed from limit for consistency
   systemPrompt = null,
   history = [],
   prompt = null,
   attachments = [],
   temperature = null,
+  finalTemperature = null,
 }) {
   const uuid = uuidv4();
   const chatMode = workspace?.chatMode ?? "chat";
+  
+  // Since messageCount and messagesLimit are passed as parameters,
+  // we check if we're already at the limit
+  if (messagesLimit !== null && messageCount >= messagesLimit) {
+    // Get more detailed error message with reset date from helpers
+    const now = new Date();
+    const monthName = now.toLocaleString('default', { month: 'long' });
+    const lastDayOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+    const daysRemaining = lastDayOfMonth.getDate() - now.getDate();
+    const resetDate = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+    
+    // Format the reset date in the same way as in checkWorkspaceMessagesLimit
+    const formattedResetDate = new Intl.DateTimeFormat('de-DE', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric'
+    }).format(resetDate);
+    
+    const { getMessageLimitErrorText } = require("../helpers");
+    const errorMessage = getMessageLimitErrorText(
+      messagesLimit, 
+      monthName, 
+      daysRemaining, 
+      formattedResetDate
+    );
+    
+    const errorData = formatJSON(
+      {
+        id: uuid,
+        type: "abort",
+        textResponse: null,
+        sources: [],
+        close: true,
+        error: errorMessage,
+        messages_limit: messagesLimit,
+        contingent: `${messageCount}/${messagesLimit}`,
+        httpStatusCode: 429 // Add this special flag for the handler to identify status code
+      },
+      { model: workspace.slug, finish_reason: "abort", messageCount, messagesLimit }
+    );
+    
+    // Set HTTP status code to 429 before writing the response
+    response.status(429);
+    response.write(`data: ${JSON.stringify(errorData)}\n\n`);
+    response.write("data: [DONE]\n\n");
+    return;
+  }
   const LLMConnector = getLLMProvider({
     provider: workspace?.chatProvider,
     model: workspace?.chatModel,
@@ -240,6 +350,9 @@ async function streamChat({
       const modified = formatJSON(originalData, {
         chunked: true,
         model: workspace.slug,
+        messageCount, // Pass down for contingent
+        messagesLimit, // Pass down for contingent
+        finalTemperature, // Pass finalTemperature to the formatter
       }); // rewrite to OpenAI format
       response.write(`data: ${JSON.stringify(modified)}\n\n`);
     } catch (e) {
@@ -442,6 +555,10 @@ async function streamChat({
       },
     });
 
+    // Get updated message limit info after saving the message
+    const { getMessageLimitInfo } = require("../helpers");
+    const { messageCount: updatedCount, messagesLimit: updatedLimit } = await getMessageLimitInfo(workspace);
+
     writeResponseChunk(
       response,
       formatJSON(
@@ -458,11 +575,17 @@ async function streamChat({
           model: workspace.slug,
           finish_reason: "stop",
           usage: stream.metrics,
+          messageCount: updatedCount, // Pass updated message count
+          messagesLimit: updatedLimit // Pass message limit
         }
       )
     );
     return;
   }
+
+  // Get updated message limit info
+  const { getMessageLimitInfo } = require("../helpers");
+  const { messageCount: updatedCount, messagesLimit: updatedLimit } = await getMessageLimitInfo(workspace);
 
   writeResponseChunk(
     response,
@@ -479,6 +602,8 @@ async function streamChat({
         model: workspace.slug,
         finish_reason: "stop",
         usage: stream.metrics,
+        messageCount: updatedCount, // Pass updated message count
+        messagesLimit: updatedLimit // Pass updated message limit
       }
     )
   );
@@ -487,7 +612,15 @@ async function streamChat({
 
 function formatJSON(
   chat,
-  { chunked = false, model, finish_reason = null, usage = {} }
+  {
+    chunked = false,
+    model,
+    finish_reason = null,
+    usage = {},
+    messageCount,
+    messagesLimit, // Changed from limit to match parameter naming in other functions
+    finalTemperature, // Add finalTemperature parameter
+  }
 ) {
   const data = {
     id: chat.uuid ?? chat.id,
@@ -507,6 +640,28 @@ function formatJSON(
     ],
     usage,
   };
+
+  // Always include contingent and messages_limit regardless of finish_reason
+  if (messageCount !== undefined) { // messagesLimit can be null
+    data.contingent = `${messageCount}/${messagesLimit ?? 'Unlimited'}`;
+    data.messages_limit = messagesLimit; // Add raw messages limit value
+  }
+  
+  // Include finalTemperature in the response if provided
+  if (finalTemperature !== undefined && finalTemperature !== null) {
+    data.finalTemperature = finalTemperature;
+  }
+  
+  // Include finalTemperature from chat object if it exists there (for non-streaming responses)
+  if (chat.finalTemperature !== undefined && chat.finalTemperature !== null) {
+    data.finalTemperature = chat.finalTemperature;
+  }
+  
+  // Preserve the httpStatusCode if it exists in the original chat response
+  // This is critical for the endpoint to know when to return a 429 status
+  if (chat.httpStatusCode) {
+    data.httpStatusCode = chat.httpStatusCode;
+  }
 
   return data;
 }

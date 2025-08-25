@@ -32,6 +32,20 @@ function isNullOrNaN(value) {
  */
 
 const Workspace = {
+  // Default settings for workspaces
+  defaults: {
+    // Default temperature values by provider
+    temperature: {
+      mistral: 0,
+      default: 0.7
+    },
+    historyCount: 20,
+    similarityThreshold: 0.25,
+    topN: 4,
+    chatMode: "chat",
+    vectorSearchMode: "default"
+  },
+  
   defaultPrompt:
     "Given the following conversation, relevant context, and a follow up question, reply with an answer to the current question the user is asking. Return only your response to the question given the above information following the users instructions as needed.",
 
@@ -43,6 +57,7 @@ const Workspace = {
     // "vectorTag",
     "openAiTemp",
     "openAiHistory",
+    "messagesLimit",
     "lastUpdatedAt",
     "openAiPrompt",
     "similarityThreshold",
@@ -64,36 +79,44 @@ const Workspace = {
       if (!value || typeof value !== "string") return "My Workspace";
       return String(value).slice(0, 255);
     },
-    openAiTemp: (value) => {
-      if (value === null || value === undefined) return null;
+    openAiTemp: (value, provider = null) => {
+      // Get the appropriate default temperature based on provider
+      const getDefaultTemp = () => {
+        const tempDefaults = Workspace.defaults.temperature;
+        return provider && tempDefaults[provider] !== undefined 
+          ? tempDefaults[provider] 
+          : tempDefaults.default;
+      };
+      
+      if (value === null || value === undefined) return getDefaultTemp();
       const temp = parseFloat(value);
-      if (isNullOrNaN(temp) || temp < 0) return null;
+      if (isNullOrNaN(temp) || temp < 0) return getDefaultTemp();
       return temp;
     },
     openAiHistory: (value) => {
-      if (value === null || value === undefined) return 20;
+      if (value === null || value === undefined) return Workspace.defaults.historyCount;
       const history = parseInt(value);
-      if (isNullOrNaN(history)) return 20;
+      if (isNullOrNaN(history)) return Workspace.defaults.historyCount;
       if (history < 0) return 0;
       return history;
     },
     similarityThreshold: (value) => {
-      if (value === null || value === undefined) return 0.25;
+      if (value === null || value === undefined) return Workspace.defaults.similarityThreshold;
       const threshold = parseFloat(value);
-      if (isNullOrNaN(threshold)) return 0.25;
+      if (isNullOrNaN(threshold)) return Workspace.defaults.similarityThreshold;
       if (threshold < 0) return 0.0;
       if (threshold > 1) return 1.0;
       return threshold;
     },
     topN: (value) => {
-      if (value === null || value === undefined) return 4;
+      if (value === null || value === undefined) return Workspace.defaults.topN;
       const n = parseInt(value);
-      if (isNullOrNaN(n)) return 4;
+      if (isNullOrNaN(n)) return Workspace.defaults.topN;
       if (n < 1) return 1;
       return n;
     },
     chatMode: (value) => {
-      if (!value || !["chat", "query"].includes(value)) return "chat";
+      if (!value || !["chat", "query"].includes(value)) return Workspace.defaults.chatMode;
       return value;
     },
     chatProvider: (value) => {
@@ -126,8 +149,14 @@ const Workspace = {
         typeof value !== "string" ||
         !["default", "rerank"].includes(value)
       )
-        return "default";
+        return Workspace.defaults.vectorSearchMode;
       return value;
+    },
+    messagesLimit: (value) => {
+      if (value === null || value === undefined || value === '') return null;
+      const limit = parseInt(value);
+      if (isNullOrNaN(limit) || limit < 0) return null;
+      return limit;
     },
   },
 
@@ -192,6 +221,8 @@ const Workspace = {
       const slugSeed = Math.floor(10000000 + Math.random() * 90000000);
       slug = this.slugify(`${name}-${slugSeed}`, { lower: true });
     }
+
+    // Default values will be handled by validation functions
 
     try {
       const workspace = await prisma.workspaces.create({

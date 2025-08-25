@@ -455,6 +455,218 @@ function toChunks(arr, size) {
   );
 }
 
+/**
+ * Counts messages for a workspace within the given time range
+ * @param {Object} workspace - The workspace object
+ * @param {Date} startDate - The start date (inclusive)
+ * @param {Date} endDate - The end date (inclusive)
+ * @returns {Promise<number>} - The count of messages within the date range
+ */
+async function countMessagesInDateRange(workspace, startDate, endDate) {
+  const { WorkspaceChats } = require("../../models/workspaceChats");
+
+  // Set the end date to the end of the day
+  const adjustedEndDate = new Date(endDate);
+  adjustedEndDate.setHours(23, 59, 59, 999);
+
+  const messageCount = await WorkspaceChats.count({
+    workspaceId: workspace.id,
+    createdAt: {
+      gte: startDate,
+      lte: adjustedEndDate,
+    },
+  });
+
+  return messageCount;
+}
+
+/**
+ * Counts messages for a workspace for the current month only
+ * @param {Object} workspace - The workspace object
+ * @returns {Promise<number>} - The count of messages for the current month
+ */
+async function countMessagesForCurrentMonth(workspace) {
+  const now = new Date();
+  const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+  const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+
+  return await countMessagesInDateRange(workspace, startOfMonth, endOfMonth);
+}
+
+/**
+ * Gets standardized message limit info for consistent response formatting
+ * using only the current month's messages
+ * @param {Object} workspace - The workspace object
+ * @returns {Promise<{messageCount: number, messagesLimit: number|null, contingent: string}>}
+ */
+async function getMessageLimitInfo(workspace) {
+  const messageCount = await countMessagesForCurrentMonth(workspace);
+  const messagesLimit = workspace.messagesLimit; // Can be null
+
+  return {
+    messageCount,
+    messagesLimit,
+    contingent: `${messageCount}/${messagesLimit ?? 'Unlimited'}`
+  };
+}
+
+/**
+ * Gets the message limit error message in the appropriate language
+ * @param {number} messagesLimit - The message limit set for the workspace
+ * @param {string} monthName - The name of the current month
+ * @param {number} daysRemaining - Number of days until the limit resets
+ * @param {string} resetDate - The formatted date when the limit will reset
+ * @param {string} language - The language code (default: 'en')
+ * @returns {string} - The translated error message
+ */
+function getMessageLimitErrorText(messagesLimit, monthName, daysRemaining, resetDate, language = 'en') {
+  const pluralS = daysRemaining !== 1 ? 's' : '';
+
+  switch (language.toLowerCase()) {
+    case 'de':
+      // German translation
+      const germanMonthName = {
+        'January': 'Januar',
+        'February': 'Februar',
+        'March': 'März',
+        'April': 'April',
+        'May': 'Mai',
+        'June': 'Juni',
+        'July': 'Juli',
+        'August': 'August',
+        'September': 'September',
+        'October': 'Oktober',
+        'November': 'November',
+        'December': 'Dezember'
+      }[monthName] || monthName;
+
+      const germanPluralDays = daysRemaining !== 1 ? 'en' : '';
+      const germanPluralMessages = messagesLimit !== 1 ? 'en' : '';
+      return `Dieser Workspace hat das monatliche Limit von ${messagesLimit} Nachricht${germanPluralMessages} für den Monat ${germanMonthName} erreicht. Ihr Limit wird in ${daysRemaining} Tag${germanPluralDays} am ${resetDate} zurückgesetzt.`;
+
+    default:
+      // English (default)
+      return `This workspace has reached the monthly message limit of ${messagesLimit} for ${monthName}. Your limit will reset in ${daysRemaining} day${pluralS} on ${resetDate}.`;
+  }
+}
+
+/**The d
+ * Checks if a workspace has reached its message limit and handles
+ * the appropriate response
+ * @param {Object} workspace - The workspace object
+ * @param {Object} response - Express response object or stream response
+ * @param {Object} options - Additional options for handling responses
+ * @param {boolean} options.isStreaming - Whether this is a streaming response
+ * @param {Function} options.writeResponseChunk - Function to write chunks to streaming response
+ * @param {Array} options.attachments - Any attachments to include in the response
+ * @param {string} options.uuid - UUID to use for the response (or will generate new one)
+ * @param {boolean} options.returnData - If true, returns the data instead of sending a response (for compatibility handlers)
+ * @param {string} options.language - The language code for error messages (default: 'en')
+ * @returns {Promise<{limitReached: boolean, messageCount: number, messagesLimit: number|null, errorData: Object|null}>}
+ */
+async function checkWorkspaceMessagesLimit(workspace, response, options = {}) {
+  const { v4: uuidv4 } = require("uuid");
+
+  const {
+    isStreaming = false,
+    writeResponseChunk = null,
+    attachments = [],
+    uuid = uuidv4(),
+    returnData = false,
+    language = 'de' // Default to German as requested
+  } = options;
+
+  // Use the helper function to get consistent message limit info for the current month only
+  const { messageCount, messagesLimit, contingent } = await getMessageLimitInfo(workspace);
+
+  // Get the current month name for better log messages
+  const now = new Date();
+  const monthName = now.toLocaleString('default', { month: 'long' });
+
+  console.log(`---
+Checking message limit for ${monthName} ${now.getFullYear()}
+Workspace: ${workspace.name} (${workspace.slug})
+Message Count: ${messageCount}
+Limit: ${messagesLimit ?? 'Unlimited'}
+---`);
+
+  // Prepare return data regardless of limit status for consistent interface
+  const result = {
+    limitReached: false,
+    messageCount,
+    messagesLimit,
+    errorData: null
+  };
+
+  if (messagesLimit !== null && messageCount >= messagesLimit) {
+    // Calculate days remaining until reset (first day of next month)
+    const now = new Date();
+    // First day of next month (when the limit resets)
+    const resetDate = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+
+    // Calculate days remaining, excluding the first day of next month
+    // Get last day of current month by setting date to 0 of next month
+    const lastDayOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+    // Now calculate the difference between today and the last day of the month
+    const daysRemaining = lastDayOfMonth.getDate() - now.getDate();
+
+    // Format the date using Intl.DateTimeFormat for proper internationalization
+    // Using German locale (de-DE) with day.month.year format
+    const formattedResetDate = new Intl.DateTimeFormat('de-DE', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric'
+    }).format(resetDate);
+
+    // Get the error message in the appropriate language
+    const errorMessage = getMessageLimitErrorText(
+      messagesLimit,
+      monthName,
+      daysRemaining,
+      formattedResetDate,
+      language
+    );
+
+    // Create consistent error data object with translated message
+    const errorData = {
+      id: uuid,
+      type: "abort",
+      textResponse: null,
+      sources: [],
+      close: true,
+      error: errorMessage,
+      messages_limit: messagesLimit,
+      contingent,
+    };
+
+    result.limitReached = true;
+    result.errorData = errorData;
+
+    // Only send response if not just returning data
+    if (!returnData) {
+      if (isStreaming && writeResponseChunk) {
+        // For streaming responses
+        // Set status code before writing the chunk
+        if (response.status) {
+          response.status(429);
+        }
+        writeResponseChunk(response, {
+          ...errorData,
+          type: "textResponse", // Different type for streaming responses
+          textResponse: errorData.error,
+          attachments,
+          httpStatusCode: 429 // Add HTTP status code flag for consistency
+        });
+      } else {
+        // For regular Express responses
+        response.status(429).json(errorData);
+      }
+    }
+  }
+
+  return result;
+}
+
 module.exports = {
   getEmbeddingEngineSelection,
   maximumChunkLength,
@@ -463,4 +675,9 @@ module.exports = {
   getBaseLLMProviderModel,
   getLLMProvider,
   toChunks,
+  countMessagesInDateRange,
+  countMessagesForCurrentMonth,
+  getMessageLimitInfo,
+  getMessageLimitErrorText,
+  checkWorkspaceMessagesLimit,
 };
